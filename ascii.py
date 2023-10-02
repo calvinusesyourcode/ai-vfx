@@ -86,7 +86,7 @@ def ascii_filter_1(fontsize=8, image_path='', showResult=False, chroma_ref_path=
     # return output_rgba.astype(np.uint8)
     print(f"ascii took: {time.time()-start_time}s")
 
-def ascii_filter_2(rgba_array, fontsize=8):
+def ascii_filter_2(rgba_array, fontsize=16):
     start_time = time.time()
     if fontsize < 5:
         print("WARNING: Font-Size is too small. This may result in an infinite loop. Enter any key to continue.")

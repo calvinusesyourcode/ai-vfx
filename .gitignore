@@ -3,5 +3,7 @@
 *.jpg
 *.pth
 *.mov
+*.json
 output
 video
+json

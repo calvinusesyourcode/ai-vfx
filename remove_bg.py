@@ -51,8 +51,8 @@ def show_mask(mask, ax, random_color=False):
 def show_points(coords, labels, ax, marker_size=375):
     pos_points = coords[labels==1]
     neg_points = coords[labels==0]
-    ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
-    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)   
+    ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='.', s=marker_size, edgecolor='white', linewidth=1.25)
+    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='.', s=marker_size, edgecolor='white', linewidth=1.25)   
     
 def show_box(box, ax):
     x0, y0 = box[0], box[1]
@@ -95,16 +95,61 @@ def mask_to_box(mask):
     
     return np.array([x1, y1, x2, y2])
 
-def show(mask, box, image, score):
-    plt.figure(figsize=(10,10))
-    plt.imshow(image)
+def show(mask, box, image, score, ax):
+    clear_axis(ax)
+    ax.imshow(image)
+    ax.set_title(f"score: {score:.3f}")
+    plt.draw()
     show_mask(mask, plt.gca())
-    show_box(box, plt.gca())
-    plt.title(f"score: {score:.3f}", fontsize=18)
-    plt.axis('off')
-    plt.show()
+    show_box(box, ax)
+    plt.draw()
+    time.sleep(20)
+
+def select_from_options(ax, options):
+    print(f"selecting from {options}")
+    rect_height = 0.1
+    rect_width = 0.2
+    colors = ['blue', 'green', 'red', 'yellow', 'purple']
+
+    rects = []
+    for i in range(len(options)):
+        x, y, w, h = [0, 0.9-(i*rect_height), rect_width, rect_height]
+        rects.append(plt.Rectangle((x, y), w, h, facecolor=colors[i % len(colors)], alpha=0.5, transform=ax.transAxes))
+
+    for rect in rects:
+        ax.add_patch(rect)
+
+    for i, option in enumerate(options):
+        ax.text(0.02, 0.9 - i * rect_height + rect_height / 3, option, color='white', transform=ax.transAxes)
+    
+    print(f"soliciting user input")
+    plt.draw()
+    userinput = plt.ginput(1)
+    point = userinput[0]
+    
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    point_x = (point[0] - xlim[0]) / (xlim[1] - xlim[0])
+    point_y = (point[1] - ylim[0]) / (ylim[1] - ylim[0])
+    
+    for i, rect in enumerate(rects):
+        x, y, w, h = rect.get_xy()[0], rect.get_xy()[1], rect.get_width(), rect.get_height()
+        if x <= point_x <= x + w and y <= point_y <= y + h:
+            return options[i]
+    
+def get_points(n, title, ax):
+    clear_axis(ax)
+    ax.set_title(f"select {n} {title}")
+    plt.draw()
+    userinput = plt.ginput(n)
+    return userinput
+    
+def clear_axis(ax):
+    for item in (ax.texts+ax.patches):
+        item.remove()
 
 # init
+print(f"Loading SAM...")
 from segment_anything import sam_model_registry, SamPredictor
 sam_checkpoint = "sam_vit_h_4b8939.pth"
 model_type = "vit_h"
@@ -112,126 +157,260 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
 sam.to(device=device)
 predictor = SamPredictor(sam)
+print(f"Done.")
 
-# ##
-video_file_path = 'video/frog2_30fps.mp4'
-file_name = video_file_path.split("/")[-1].split(".")[0] if "/" in video_file_path else video_file_path.split(".")[0]
-print(file_name)
-start_frame = 75
+# config
+video_folder = "video_in"
+json_folder = "json"
 
-input_video_path = video_file_path
-output_video_path = 'video/frog2_30fps2.mp4'
+# initialize figure and axis just once
+fig, ax = plt.subplots(figsize=(10, 10))
+plt.figure(fig)
+plt.axis("off")
 
-if get_fps(input_video_path) != 30:
-    change_fps_with_ffmpeg(input_video_path, output_video_path)
-    video_file_path = output_video_path
+# pre-setup
+modes = ["default", "middle-out", "reverse"]
+os.makedirs(video_folder, exist_ok=True)
+os.makedirs(json_folder, exist_ok=True)
+videos = os.listdir(video_folder)
+if videos is None or len(videos) == 0:
+    print(f"Critical failure: No files found in folder {video_folder}")
+    exit
 
-capture = cv2.VideoCapture(video_file_path)
+# setup videos for processing
+v = 0
+for video_file in videos: # setup
+    video_shortname, ext = os.path.splitext(video_file)
+    video_title = video_shortname
 
+    if ext.lower() != ".mp4":
+        print(f"Skipped, non mp4: {video_file}")
+        videos.remove(video_file)
+        continue
+    
+    if f"{video_shortname}.json" in os.listdir("json"):
+        print(f"Skipped, already have setup info: {video_file}")
+        continue
 
+    video_fullpath = os.path.join(video_folder, video_file)
+    capture = cv2.VideoCapture(video_fullpath)
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    print(f"Processing {video_fullpath}")
 
-i = 0
-cutout = None
-setup_completed = False
-if not capture.isOpened():
-    print("Error: Couldn't open the video file.")
-else:
+    start_frame = 0
+    chosen_frame = None
+
+    capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    return_flag, current_frame = capture.read()
+
+    image = current_frame
+    image_height, image_width, _ = image.shape
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    ax.imshow(image)
+    ax.set_title("mode select")
+    clear_axis(ax)
+    chosen_mode = select_from_options(ax, modes)
+
+    look_frame = int(total_frames//2) if chosen_mode == "middle-out" else int(total_frames-1) if chosen_mode == "reverse" else 0 
+    look_frame_skip = 120
+
     while True:
-        frame_start = time.time()
+        capture.set(cv2.CAP_PROP_POS_FRAMES, look_frame)
         return_flag, current_frame = capture.read()
 
-        if not return_flag:
-            print("End of video.")
-            break
-        if i < start_frame:
-            i += 1
-            continue
-
-        # Your image processing code here
         image = current_frame
+        image_height, image_width, _ = image.shape
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        predictor.set_image(image)
 
-        if not setup_completed:
-            plt.figure(figsize=(10,10))
-            plt.imshow(image)
-            plt.axis('off')
-            plt.title('Select 2 foreground points')
-            foreground = plt.ginput(2)
-            plt.close()
-            plt.figure(figsize=(10,10))
-            plt.imshow(image)
-            plt.axis('off')
-            plt.title('Select 3 background points')
-            background = plt.ginput(3)
-            plt.close()
-        
-            input_points = np.array(foreground, dtype=int)
-            bg_points = np.array(background, dtype=int)
-            bg_labels = np.array([0,0,0])
-            input_labels = np.array([1,1])
-            masks, scores, logits = predictor.predict(
-                point_coords=input_points,
-                point_labels=input_labels,
-                multimask_output=True,
-            )
-
-            # print(masks.shape)
-            for j, (mask, score) in enumerate(zip(masks, scores)):
-                if j == 2:
-                    bbox = mask_to_box(mask)
-                    show(mask,bbox,image,score)
-                    # approved_mask = mask
-
-            setup_completed = True
-            last_mask = logits[np.argmin(scores), :, :]
-
+        clear_axis(ax)
+        ax.imshow(image)
+        ax.set_title(f'frame {look_frame}')
+        choices = [f"< {look_frame_skip} frames",f"> {look_frame_skip} frames", "here"]
+        selected_option = select_from_options(ax, choices)
+        if selected_option is None:
+            print("??")
+            continue
+        elif selected_option == "here":
+            chosen_frame = look_frame
+            pass
+        elif ">" in selected_option:
+            look_frame = min(total_frames-1, look_frame + look_frame_skip)
+            continue
+        elif "<" in selected_option:
+            look_frame = max(0, look_frame - look_frame_skip)
+            continue
         else:
-            masks, scores, logits = predictor.predict(
-                box=bbox,
-                point_coords=bg_points,
-                point_labels=bg_labels,
-                mask_input=last_mask[None, :, :],
-                multimask_output=False,
-            )
-            # print(masks.shape)
-            for j, (mask, score) in enumerate(zip(masks, scores)):
-                bbox = mask_to_box(mask)
-                # show(mask, bbox, image, score)
+            print(f"User error?: unrecognized option selected for init masking frame {video_fullpath}")
+            continue
+        print(f"selected option: {selected_option}")
 
-            last_mask = logits[np.argmin(scores), :, :]
+        if chosen_frame is None:
+            print(f"User error?: No chosen frame during {video_fullpath}")
+            continue
+        
+        capture.set(cv2.CAP_PROP_POS_FRAMES, chosen_frame)
+        return_flag, image = capture.read()
 
+        image_height, image_width, _ = image.shape
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        foreground_points = get_points(3, "foreground points", ax)
+        background_points = get_points(3, "persisting background points", ax)
+
+        predictor.set_image(image)
+        masks, scores, logits = predictor.predict(
+            point_coords=np.array((foreground_points+background_points), dtype=int),
+            point_labels=np.array(([1]*len(foreground_points))+([0]*len(background_points)), dtype=int),
+            multimask_output=True,
+        )
+
+        for j, (mask, score) in enumerate(reversed(list(zip(masks, scores)))):
+            # plt init
+            clear_axis(ax)
+            ax.imshow(image)
+            ax.set_title(f"mask {j} score: {score:.3f}")
+            
+            # show box
+            box = mask_to_box(mask)
+            x0, y0 = box[0], box[1]
+            w, h = box[2] - box[0], box[3] - box[1]
+            ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))
+
+            # show mask
+            color = np.array([30/255, 144/255, 255/255, 0.6])
+            h, w = mask.shape[-2:]
+            mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+            ax.imshow(mask_image)
+
+            plt.draw()
+            mask_approved = True if select_from_options(ax, ["yes", "no"]) == "yes" else False
+
+            if mask_approved:
+                chosen_mask = logits[j, :, :]
+                break
+        
+        if mask_approved:
+            break
+        else:
+            print(f"Restarting mask creation for video {video_fullpath}")
+
+    # This test was a success, chosen_mask[] uses weights, mask[] is boolean
+    #####
+    # for i, _ in enumerate(chosen_mask):
+    #     if not (chosen_mask[i] == mask[i]):
+    #         print(f"last mask {i}: {chosen_mask[i]}, mask {i}: {mask[i]}")
+    # print("if no prints above then mask and chosen_mask are equal")
+    #####
+
+    # save video setup
+    video_setup_data = {
+        'video_fullpath': video_fullpath,
+        'chosen_mode': chosen_mode,
+        'chosen_startframe': chosen_frame,
+        'chosen_box': box.tolist(),
+        'chosen_bg_points': background_points,
+        'chosen_mask': chosen_mask.tolist(),
+    }
+
+    with open(f"json/{video_shortname}.json", 'w') as f:
+        json.dump(video_setup_data, f)
+        print(f"Saved info for file {video_fullpath}")
+
+    v += 1
+    print(f"Success: processed {video_fullpath}")
+
+print(f"{v} video(s) setup.")
+
+# process videos
+v = 0
+for video_file in videos:
+    video_shortname, ext = os.path.splitext(video_file)
+    video_title = video_shortname
+
+    if ext.lower() != ".mp4":
+        print(f"Skipped, non mp4: {video_file}")
+        continue
+    
+    if f"{video_shortname}.json" not in os.listdir("json"):
+        print(f"No JSON setup data found: {video_file}")
+        continue
+    
+    with open(f"{json_folder}/{video_shortname}.json", "r") as f:
+        print(f"Retrieving JSON setup data: {video_file}")
+        video_setup = json.load(f)
+        video_fullpath = video_setup["video_fullpath"]
+        chosen_mode = video_setup["chosen_mode"]
+        chosen_startframe = video_setup["chosen_startframe"]
+        chosen_box = np.array(video_setup["chosen_box"], dtype=int)
+        chosen_bg_points = np.array(video_setup["chosen_bg_points"], dtype=float)
+        chosen_mask = np.array(video_setup["chosen_mask"], dtype=float)
+
+    video_fullpath = os.path.join(video_folder, video_file)
+    capture = cv2.VideoCapture(video_fullpath)
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    print(f"Processing {video_fullpath}")
+
+    frames_processed = 0
+    process_frame = chosen_startframe
+    last_mask = chosen_mask
+    last_box = chosen_box
+    while frames_processed < total_frames:
+        process_inittime = time.time()
+
+        capture.set(cv2.CAP_PROP_POS_FRAMES, process_frame)
+        return_flag, current_frame = capture.read()
+
+        image_height, image_width, _ = current_frame.shape
+        image = cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB)
+
+        if not capture.isOpened():
+            print(f"Error: Couldn't open file: {video_file}")
+            break
+        
+        predictor.set_image(image)
+        masks, scores, logits = predictor.predict(
+            box=last_box,
+            point_coords=chosen_bg_points,
+            point_labels=([0]*len(chosen_bg_points)),
+            mask_input=last_mask[None, :, :],
+            multimask_output=False,
+        )
+
+        mask = masks[0]
+        score = scores[0]
+        last_mask = logits[0, :, :]
+        box = mask_to_box(mask)
+
+        # write files
         output_masked_image = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
         output_masked_image[mask == 1, :3] = image[mask == 1]
-        output_masked_image[mask == 1, 3] = 255  # Setting alpha channel
+        output_masked_image[mask == 1, 3] = 255  # setting alpha channel
 
-        # Save this output image as PNG
-        os.makedirs(f"output/{file_name}/mask", exist_ok=True)
-        cv2.imwrite(f'output/{file_name}/mask/{file_name}_mask_{i}.png', cv2.cvtColor(output_masked_image, cv2.COLOR_RGBA2BGRA))
-
-        # Now, let's cut out the mask part from the original image
+        os.makedirs(f"output/{video_title}/mask", exist_ok=True)
+        cv2.imwrite(f'output/{video_title}/mask/{video_title}_mask_{process_frame}.png', cv2.cvtColor(output_masked_image, cv2.COLOR_RGBA2BGRA))
 
         output_cutout_image = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
         output_cutout_image[:, :, :3] = image
-        output_cutout_image[:, :, 3] = 255  # Initialize alpha channel to fully visible
-        output_cutout_image[mask == 1, 3] = 0  # Make the mask part transparent
+        output_cutout_image[:, :, 3] = 255 # init alpha channel 
+        output_cutout_image[mask == 1, 3] = 0  # mask part transparent
 
-        # Save this output cutout image as PNG
-        os.makedirs(f"output/{file_name}/cutout", exist_ok=True)
-        cv2.imwrite(f'output/{file_name}/cutout/{file_name}_cutout_{i}.png', cv2.cvtColor(output_cutout_image, cv2.COLOR_RGBA2BGRA))
+        os.makedirs(f"output/{video_title}/cutout", exist_ok=True)
+        cv2.imwrite(f'output/{video_title}/cutout/{video_title}_cutout_{process_frame}.png', cv2.cvtColor(output_cutout_image, cv2.COLOR_RGBA2BGRA))
 
-        # time.sleep(0.1)
-        print(f"frame {i} took {(time.time()-frame_start):.3f} seconds")
-        i += 1
+        frames_processed += 1
 
-        # Exit loop if 'q' is pressed
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-
-    # Release the VideoCapture object
+        if process_frame < chosen_startframe:
+            process_frame += -1
+        elif (total_frames - chosen_startframe) == frames_processed:
+            process_frame = chosen_startframe - 1
+            last_mask = chosen_mask
+            last_box = chosen_box
+        else:
+            process_frame += 1
+        
+        print(f"frame {process_frame} took {(time.time()-process_inittime):.3f} seconds")
+    
     capture.release()
-
-    # Close all OpenCV windows
-    cv2.destroyAllWindows()

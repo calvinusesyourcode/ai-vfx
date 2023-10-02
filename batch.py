@@ -1,4 +1,4 @@
-import os, cv2, typing
+import os, cv2, typing, subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 from ascii import ascii_filter_2, ascii_filter_1
@@ -56,4 +56,27 @@ def apply_filter_to_masks(parent_folder: str, filter: typing.Callable):
 
         # for img in os.listdir(os.path.join(dir, parent_folder))
 
-apply_filter_to_masks("output/frog2_30fps", ascii_filter_2)
+def convert_mov_to_mp4(folder_path):
+    # List all files in the folder
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".MOV") or filename.endswith(".mov"):
+            # Prepare the output filename
+            output_filename = os.path.splitext(filename)[0] + ".mp4"
+            output_filepath = os.path.join(folder_path, output_filename)
+
+            # Prepare the input filepath
+            input_filepath = os.path.join(folder_path, filename)
+
+            # Run ffmpeg command
+            command = [
+                'ffmpeg',
+                '-i', input_filepath,
+                '-vf', 'fps=30',
+                '-y',  # Overwrite output file if it exists
+                output_filepath
+            ]
+            subprocess.run(command)
+
+
+# convert_mov_to_mp4("video_in")
+apply_filter_to_masks("output/IMG_4764", ascii_filter_2)
